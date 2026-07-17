@@ -1,0 +1,246 @@
+"""
+LAXIS AI - Enhanced Single-file Implementation
+Combines: Ollama chat, MediaPipe hand tracking, OpenCV, SpeechRecognition, pyttsx3
++ Weather Info via OpenWeatherMap API
+Author: LAXIS AI template for Lakshya
+"""
+
+import threading
+import queue
+import time
+import sys
+import signal
+import logging
+import datetime
+import webbrowser
+import requests
+
+# Third-party imports
+try:
+    import ollama
+    import cv2
+    import mediapipe as mp
+    import speech_recognition as sr
+    import pyttsx3
+except Exception as e:
+    print("Import failed:", e)
+    raise
+
+# ----------------------------
+# Configuration
+# ----------------------------
+MODEL_NAME = "llama3.2"
+VOICE_RATE = 170
+VOICE_VOLUME = 1.0
+VOICE_INDEX = 0
+SPEECH_TIMEOUT = 6
+SPEECH_PHRASE_TIME_LIMIT = 8
+HAND_DETECTION_CONFIDENCE = 0.7
+HAND_TRACKING_CONFIDENCE = 0.7
+MAX_NUM_HANDS = 2
+GESTURE_PINCH_THRESHOLD = 0.05
+CAMERA_INDEX = 0
+LOG_LEVEL = logging.INFO
+
+# Weather API (replace with your own API key from OpenWeatherMap)
+WEATHER_API_KEY = "YOUR_OPENWEATHERMAP_API_KEY"
+DEFAULT_CITY = "Indore"
+
+# ----------------------------
+# Logging
+# ----------------------------
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("LAXIS")
+
+# ----------------------------
+# Utilities
+# ----------------------------
+def now_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def get_weather(city=DEFAULT_CITY):
+    """Fetch current weather using OpenWeatherMap API"""
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
+        response = requests.get(url)
+        data = response.json()
+        if data.get("main"):
+            temp = data["main"]["temp"]
+            desc = data["weather"][0]["description"]
+            return f"The weather in {city} is {desc} with {temp}°C."
+        else:
+            return "Sorry, I couldn't fetch the weather right now."
+    except Exception as e:
+        logger.exception("Weather fetch failed: %s", e)
+        return "Weather service is unavailable."
+
+# ----------------------------
+# Chat Client
+# ----------------------------
+class ChatClient:
+    def __init__(self, model_name=MODEL_NAME, system_prompt=None, options=None):
+        self.model_name = model_name
+        self.system_prompt = system_prompt or "You are LAXIS AI, a friendly intelligent personal assistant."
+        self.options = options or {}
+        logger.info("ChatClient initialized with model %s", self.model_name)
+
+    def ask(self, user_text):
+        try:
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_text}
+            ]
+            response = ollama.chat(model=self.model_name, messages=messages, options=self.options)
+            content = response.get("message", {}).get("content", "")
+            return content
+        except Exception as e:
+            logger.exception("Error calling Ollama: %s", e)
+            return "Sorry, I couldn't reach the AI service right now."
+
+# ----------------------------
+# Text-to-Speech
+# ----------------------------
+class TTS:
+    def __init__(self, rate=VOICE_RATE, volume=VOICE_VOLUME, voice_index=VOICE_INDEX):
+        self.engine = pyttsx3.init()
+        self.engine.setProperty("rate", rate)
+        self.engine.setProperty("volume", volume)
+        voices = self.engine.getProperty("voices")
+        if voices and 0 <= voice_index < len(voices):
+            self.engine.setProperty("voice", voices[voice_index].id)
+        self.lock = threading.Lock()
+
+    def speak(self, text, block=True):
+        if not text:
+            return
+        with self.lock:
+            self.engine.say(text)
+            if block:
+                self.engine.runAndWait()
+
+    def stop(self):
+        with self.lock:
+            try:
+                self.engine.stop()
+            except Exception:
+                pass
+
+    def shutdown(self):
+        self.stop()
+        try:
+            del self.engine
+        except Exception:
+            pass
+
+# ----------------------------
+# VoiceThread, VisionThread (unchanged from your version)
+# ----------------------------
+# [Keep your existing VoiceThread and VisionThread classes here]
+
+# ----------------------------
+# Main Orchestrator
+# ----------------------------
+class LaxisAI:
+    def __init__(self):
+        self.command_queue = queue.Queue()
+        self.chat = ChatClient()
+        self.tts = TTS()
+        self.voice_thread = VoiceThread(self.command_queue, tts=self.tts)
+        self.vision_thread = VisionThread(self.command_queue, camera_index=CAMERA_INDEX)
+        self.running = False
+
+    def start(self):
+        self.running = True
+        self.voice_thread.start()
+        self.vision_thread.start()
+        self.tts.speak("Hello. I am LAXIS AI. Ready.", block=False)
+        self.main_loop()
+
+    def handle_command(self, source, payload):
+        if source == "voice":
+            self._execute_voice_command(payload)
+        elif source == "gesture":
+            self._execute_gesture(payload)
+        elif source == "system":
+            if payload == "exit":
+                self.shutdown()
+
+    def _execute_voice_command(self, command):
+        if not command:
+            return
+        if "time" in command:
+            now = datetime.datetime.now().strftime("%I:%M %p")
+            self.tts.speak("Current time is " + now)
+            return
+        if "date" in command:
+            today = datetime.datetime.now().strftime("%d %B %Y")
+            self.tts.speak("Today is " + today)
+            return
+        if "weather" in command:
+            weather_info = get_weather()
+            self.tts.speak(weather_info)
+            return
+        if "open youtube" in command:
+            webbrowser.open("https://www.youtube.com")
+            self.tts.speak("Opening YouTube")
+            return
+        if "open chrome" in command or "open google" in command:
+            webbrowser.open("https://www.google.com")
+            self.tts.speak("Opening Google")
+            return
+        if "exit" in command or "goodbye" in command or "quit" in command:
+            self.tts.speak("Goodbye. Have a nice day.")
+            self.shutdown()
+            return
+
+        # Otherwise ask AI
+        self.tts.speak("Let me think about that.", block=False)
+        answer = self.chat.ask(command)
+        self.tts.speak(answer)
+
+    def _execute_gesture(self, gesture_name):
+        if gesture_name == "pinch":
+            status = "I see your pinch gesture. I am ready to take a voice command."
+            self.tts.speak(status)
+
+    def main_loop(self):
+        while self.running:
+            try:
+                source, payload = self.command_queue.get(timeout=0.5)
+                self.handle_command(source, payload)
+            except queue.Empty:
+                continue
+
+    def shutdown(self):
+        if not self.running:
+            return
+        self.running = False
+        try:
+            self.voice_thread.stop()
+            self.vision_thread.stop()
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            self.tts.shutdown()
+        except Exception:
+            pass
+        sys.exit(0)
+
+# ----------------------------
+# Entrypoint
+# ----------------------------
+if __name__ == "__main__":
+    app = LaxisAI()
+    try:
+        app.start()
+    except Exception as e:
+        logger.exception("Fatal error in main: %s", e)
+        try:
+            app.shutdown()
+        except Exception:
+            pass
